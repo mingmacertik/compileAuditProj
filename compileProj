@@ -1,0 +1,239 @@
+#!/bin/bash
+BRANCH=$1
+PROJ_DIR=$2
+
+# !!! you need to define the following five variables before running this script
+# please find more details in README.md
+#SCRIPT_DIR="/Users/mingma/Documents/workspace/scripts"
+#SOLC_DIR="/Users/mingma/Documents/workspace/solc"
+#SOLC_LIST="/Users/mingma/Documents/workspace/solc/list"
+#LIB_DIR="/Users/mingma/Documents/workspace/solc/lib"
+#BUILD_DIR="/Users/mingma/Documents/workspace/solc/bin"
+
+# Helper function which compare two version strings 
+# Returns 0 if two version strings are same, 1 if ver1 > ver2, otherwise return 2
+vercomp () {
+    if [[ $1 == $2 ]]
+    then
+        return 0
+    fi
+
+    local IFS=.
+    local i ver1=($1) ver2=($2)
+
+    # fill empty fields in ver1 with zeros
+    for ((i=${#ver1[@]}; i<${#ver2[@]}; i++))
+    do
+        ver1[i]=0
+    done
+    # fill empty fields in ver2 with zeros
+    for ((i=${#ver2[@]}; i<${#ver1[@]}; i++))
+    do
+        ver2[i]=0
+    done
+
+    for ((i=0; i<${#ver1[@]}; i++))
+    do
+        if [[ -z ${ver2[i]} ]]
+        then
+            # fill empty fields in ver2 with zeros
+            ver2[i]=0
+        fi
+         
+        if (( 10#${ver1[i]} > 10#${ver2[i]} ))
+        then
+            return 1
+        fi
+        if (( 10#${ver1[i]} < 10#${ver2[i]} ))
+        then
+            return 2
+        fi
+    done
+    return 0
+}
+
+ #
+ # remove duplicated "SPDX-License-Identifier: MIT" strings in the file, only keep the first one
+ #
+removeDuplicateSPDX() {
+    if [ "$(grep "SPDX-License-Identifier: MIT" $1|wc -l)" != "1" ]
+    then
+        echo "// SPDX-License-Identifier: MIT" > .tmp
+        cat $1 |sed  's/SPDX-License-Identifier: MIT//' >> .tmp
+        cat .tmp> $1
+        rm -f .tmp
+    fi
+}
+
+
+
+
+REMAPPING_STR=""
+
+
+downloadLibFromNPM() {
+    cd $PROJ_DIR
+    PKG_FILE=$PROJ_DIR/"package.json"
+    rm -rf "$PROJ_DIR/node_modules"
+
+    # This is a NPM package since package.json exists. 
+    # Use "npm install" command to download all require libaries, then save them in $LIB_DIR/<OWNER>/<PROJECT>/<VER>
+    if [ -f $PKG_FILE ]; then
+
+        # Parse import lines in all 
+        pkgs=$(cat $PKG_FILE|jq -r '.dependencies|to_entries[] | "\(.key)@\(.value)"'|sed 's/\^/v/')
+        #echo $pkgs
+
+        for pkg in $pkgs
+        #pkg @openzeppelin/contracts": "^3.3.0
+        do
+            #echo "pkg is $pkg"
+
+            if [[ ! $pkg == @* ]]; then
+                continue
+            fi
+            IFS='@' read -r -a array <<< "$pkg"
+            pkgname="${array[1]}"
+            pkgver="${array[2]}"
+            #echo "pkg is $pkg, $pkgname, $pkgver"
+            srcdir="$PROJ_DIR/node_modules/@$pkgname/"
+            destdir="$LIB_DIR/$pkgname/$pkgver"
+            #echo "---- copy $pkg $pkgname $pkgver"
+            if [ ! -d "$LIB_DIR/$pkgname/$pkgver" ]; then
+                npm install $pkg --save
+                mkdir -p "$destdir"
+                #echo "---- copy libary from $srcdir $destdir"
+                cp -rf $srcdir $destdir
+                rm -rf "$PROJ_DIR/node_modules"
+            fi
+            REMAPPING_STR="$REMAPPING_STR "@$pkgname"=$destdir" 
+        done
+    
+    fi
+}
+
+downloadLibGithub() {
+    cd $PROJ_DIR
+    # import https://github.com/<oppenzepplin>/<contracts>/blob/<v1.4.4>/.../<file>.sol
+    # Get the import strings which include "github.com" from all .sol files
+    all_github_imports=$(grep -rnw  --include \*.sol  import . |grep ".sol" |grep "github.com"|awk -F "github.com" '{print $2}'|awk -F ".sol" '{print $1}'|sort |uniq)
+    if [ -n $all_github_import ]; then
+        #REMAPPING_STR="$REMAPPING_STR https://github.com/=$LIB_DIR github.com/=$LIB_DIR"
+
+        for str in $all_github_imports
+        do
+            # echo "link $str"
+            # parse git <OWNER> <PROJECT NAME> <TAG>
+            # example: github.com/oppenzeppeline/contracts/v1.4.0
+
+            gitowner=$(echo $str|awk -F "/" '{print $2}')
+            gitproj=$(echo $str|awk -F "/" '{print $3}')
+            gittag=$(echo $str |awk -F "blob\/" '{print $2}'|awk -F "/" '{print $1}')
+                
+            libDir="$LIB_DIR/$gitowner/$gitproj/$gittag"
+            
+            if [ ! -d "$libDir" ]; then
+            echo "---- clone $gitowner/$gitproj/$gittag in lib $libDir"
+            mkdir -p "$libDir"
+            git clone --branch $gittag "https://github.com/$gitowner/$gitproj.git" $libDir
+
+            # else
+            #    cd $libDir
+            #    git pull
+            #    cd $PROJ_DIR
+            fi
+            REMAPPING_STR="$REMAPPING_STR https://github.com/$gitowner/$gitproj/blob/$gittag=$libDir github.com/$gitowner/$gitproj/blob/$gittag=$libDir"
+        done
+    fi
+}
+
+
+#echo "-------------- Remapping str $REMAPPING_STR"
+
+
+
+################################
+# Main function
+################################
+
+
+cd $PROJ_DIR
+# resolve dependencies down load all libary files from NPM and github
+downloadLibFromNPM
+downloadLibGithub
+
+#for each file in $solfiles
+find . -type f -name "*.sol" -print0 | while IFS= read -r -d $'\0' file; 
+do
+    IFS=' '
+    read -ra ADDR <<< $(grep "pragma solidity" $file)
+
+    # Parse the compiler version from pragma
+    for str in "${ADDR[@]}"
+    do
+        #echo $str
+        if [[ $str =~ ^[\^] ]]; then
+        #replace the last field with a
+            #highver=$(echo $str|sed -r 's/\^/v/'|sed -r 's/\.[0-9]*;/.99/')
+            highver=$(echo $str|sed -r 's/\^/v/'|sed -r 's/\.[0-9]*;/.99./')
+        elif [[ $str =~ ^["="] ]]; then
+            highver=$(echo $str|sed -r 's/=/v/'|sed -r 's/\;//')".1"
+        elif [[ $str =~ ^[">"]["="] ]]; then
+            #highver=$(echo $str|sed -r 's/>=/v/'|sed -r 's/;//')".1"
+            highver="v9999.9999.9999"
+        elif [[ $str =~ ^["<"]["="] ]]; then
+            highver=$(echo $str|sed -r 's/<=/v/'|sed -r 's/;//')".1"
+        elif [[ $str =~ ^[">"] ]]; then
+            #highver=$(echo $str|sed -r 's/>/v/'|sed -r 's/;//')
+            highver="v9999.9999.9999"
+        elif [[ $str =~ ^["<"] ]]; then
+            highver=$(echo $str|sed -r 's/\</v/'|sed -r 's/;//')
+        elif [[ $str =~ ^[0-9]*.[0-9]*.[0-9]* ]]; then
+            highver="v$(echo $str|sed -r 's/\;//').1"
+        else
+        continue
+        fi	
+    done
+
+    echo "ver is $highver "
+
+    versions=$(cat $SOLC_LIST|awk '{print $1}')
+
+    while read v
+    do
+        #if [[ "$v" < "$highver" ]]; then
+        vercomp "${v:1}" "${highver:1}"
+        if [ $? == 2 ]; then
+        ver=$v
+        break
+        fi
+    done <<< "$versions"
+
+    
+    # special handling 
+    if [ !  -f $PKG_FILE ]; then
+        openzeppelinimports=$(grep "@openzeppelin/contracts" "$file")
+        if [ ! -z  "$openzeppelinimports" ]; then
+        if [[ ! "$ver" < "v0.8.0" ]]; then
+            REMAPPING_STR="$REMAPPING_STR  @openzeppelin/contracts=$LIB_DIR/openzeppelin/contracts/v4.0.0"
+        elif [[ ! "$ver" < "v0.6.0" ]]; then
+            REMAPPING_STR="$REMAPPING_STR  @openzeppelin/contracts=$LIB_DIR/openzeppelin/contracts/v3.4.0"
+        else
+            echo "Can't find openzeppeline contracts lib"
+        fi
+        fi
+    fi
+
+    # remove duplicated "SPDX-License-Identifier: MIT" strings in the file, only keep the first one
+    removeDuplicateSPDX $file
+
+
+    # compile the file, and save the compiled evm file in the target folder BIN_DIR
+    targetDir="$BUILD_DIR/$BRANCH/$dir"
+    mkdir  -p $targetDir 
+    cmd="$SOLC_DIR/$ver/solc --asm  --overwrite -o $targetDir    --allow-paths "$LIB_DIR",.  $REMAPPING_STR   $file"
+    echo "Compiling file $f, $cmd"
+    $cmd
+
+    #    echo $f ":" "$ver" "$str" 
+done

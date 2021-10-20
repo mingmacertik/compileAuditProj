@@ -1,0 +1,35 @@
+#!/bin/bash
+#REPO_DIR="/Users/mingma/Documents/workspace/certik-audit-projects"
+#SCRIPTS_DIR="/Users/mingma/Documents/workspace/scripts"
+
+
+cd $REPO_DIR
+for b in $(git branch -a|grep "remotes\/origin"|awk -F "/" '{print $3}'); do
+	echo "Working on branch " $b
+
+	# checkout a branch, clean up the leftover unstaged/uncommitted files
+	cd $REPO_DIR
+	git checkout -- .
+	git checkout $b
+	git clean -fd
+
+
+	if [ ! -d "$REPO_DIR/projects" ] ; then
+    	$SCRIPTS_DIR/compileProj $b $REPO_DIR
+		echo "Compiling branch $b $REPODIR"
+    	continue
+	fi
+
+	
+
+	for dir in $(ls "$REPO_DIR/projects")
+	do
+		#echo "dir is $dir"
+		PROJ_DIR="$REPO_DIR/projects/$dir"
+		if [ ! -d "$PROJ_DIR" ] ; then
+			continue
+		fi
+		echo "Compiling  branch $b/$dir $PROJ_DIR"
+		$SCRIPTS_DIR/compileProj $b $PROJ_DIR
+	done
+done
